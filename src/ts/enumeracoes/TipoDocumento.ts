@@ -1,5 +1,5 @@
 export enum TipoDocumento {
-    CPF = 'Cadastro de Pessoa Física',
+    CPF = 'Cadastro de Pessoas Física',
     RG = 'Registro Geral',
     Passaporte = 'Passaporte'
 }
