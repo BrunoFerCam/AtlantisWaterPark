@@ -2,7 +2,7 @@
 
 Repositório criado para envio das atividades do exercício Atlantis Water Park.
 
-## Atividade I
+## Atividade II
 
 ## Instruções para execução do projeto:
 
