@@ -2,6 +2,15 @@ import express from 'express'
 import cors from 'cors'
 import Armazem from '../../src/ts/dominio/armazem'
 import Cliente from '../../src/ts/modelos/cliente'
+// Attempt to load DB API; if it fails (dependency missing) we'll continue with in-memory Armazem
+let dbApi: any = null
+try {
+  const createDbApi = require('./db').default
+  dbApi = createDbApi()
+  console.log('DB API loaded, persistence enabled')
+} catch (err) {
+  console.warn('DB API not available, using in-memory store. Run `npm install` in server/ to enable DB persistence.')
+}
 import type { Request, Response } from 'express'
 
 const app = express()
@@ -72,6 +81,7 @@ seedData()
 // Helper: serialize Cliente to plain object
 function clienteToPlain(c: any) {
   return {
+    id: c.id || null,
     nome: c.Nome,
     cpf: c.CPF,
     nomeSocial: c.NomeSocial,
@@ -92,6 +102,22 @@ function clienteToPlain(c: any) {
 }
 
 app.get('/clientes', (req: Request, res: Response) => {
+  if (dbApi) {
+    const titulares = dbApi.getTitulares()
+    const list = titulares.map((t: any) => ({
+      id: t.id,
+      nome: t.nome,
+      nomeSocial: t.nomeSocial,
+      dataNascimento: t.dataNascimento,
+      dataCadastro: t.dataCadastro,
+      cpf: t.cpf,
+      telefones: t.telefones,
+      endereco: t.endereco,
+      documentos: t.documentos,
+      dependentes: dbApi.getDependentesOf(t.cpf).map((d: any) => ({ nome: d.nome, cpf: d.cpf, nomeSocial: d.nomeSocial }))
+    }))
+    return res.json(list)
+  }
   const list = armazem.Clientes.map((c: any) => clienteToPlain(c))
   res.json(list)
 })
@@ -103,7 +129,18 @@ app.post('/clientes', (req: Request, res: Response) => {
   }
   const nascimento = new Date(dataNascimento)
   const cpf = req.body.cpf
-  if (cpf && armazem.cpfExiste(cpf)) return res.status(400).json({ error: 'cpf already exists' })
+  if (cpf && ((dbApi && dbApi.cpfExists(cpf)) || armazem.cpfExiste(cpf))) return res.status(400).json({ error: 'cpf already exists' })
+  // If DB enabled, persist
+  if (dbApi) {
+    try {
+      const created = dbApi.insertCliente({ nome, nomeSocial, dataNascimento, cpf })
+      return res.status(201).json(created)
+    } catch (err) {
+      console.error('DB insert error:', err)
+      return res.status(500).json({ error: 'db error' })
+    }
+  }
+
   const cliente = new Cliente(nome, nomeSocial || '', nascimento, cpf)
   armazem.Clientes.push(cliente)
   return res.status(201).json(clienteToPlain(cliente))
@@ -112,34 +149,55 @@ app.post('/clientes', (req: Request, res: Response) => {
 app.post('/clientes/:index/dependentes', (req: Request, res: Response) => {
   const idx = Number(req.params.index)
   console.log('POST /clientes/' + req.params.index + '/dependentes', req.body)
-  const titular = armazem.Clientes[idx]
-  if (!titular) return res.status(404).json({ error: 'titular not found' })
   const { nome, nomeSocial, dataNascimento, clonarContato, cpf } = req.body
   if (!nome || !dataNascimento || !cpf) return res.status(400).json({ error: 'nome, dataNascimento and cpf required' })
+
+  // When DB is enabled, we expect :index to be titular id
+  if (dbApi) {
+    const titularId = Number(req.params.index)
+    const titulares = dbApi.getTitulares()
+    const titular = titulares.find((t: any) => t.id === titularId)
+    if (!titular) return res.status(404).json({ error: 'titular not found' })
+    if (dbApi.cpfExists(cpf)) return res.status(400).json({ error: 'cpf already exists' })
+    try {
+      const dependente = dbApi.insertDependente(titular.cpf, { nome, nomeSocial, dataNascimento, cpf, endereco: clonarContato ? titular.endereco : null, telefones: clonarContato ? titular.telefones : [] })
+      return res.status(201).json(dependente)
+    } catch (err) {
+      console.error('DB error inserting dependente:', err)
+      return res.status(500).json({ error: 'db error' })
+    }
+  }
+
+  const idxNum = Number(req.params.index)
+  const titular = armazem.Clientes[idxNum]
+  if (!titular) return res.status(404).json({ error: 'titular not found' })
   const nascimento = new Date(dataNascimento)
-  // create dependent with CPF set (constructor accepts optional cpf)
-
   if (armazem.cpfExiste(cpf)) return res.status(400).json({ error: 'cpf already exists' })
-
   const dependente = new Cliente(nome, nomeSocial || '', nascimento, cpf)
-
-  // Use the domain method to add dependent so cloning and links happen
   try {
     titular.adicionarDependente(dependente)
   } catch (err) {
     console.error('Erro ao adicionar dependente:', err)
     return res.status(500).json({ error: 'erro ao cadastrar dependente' })
   }
-
   return res.status(201).json(clienteToPlain(dependente))
 })
 
 // Delete dependent by cpf for a titular
 app.delete('/clientes/:index/dependentes/:cpf', (req: Request, res: Response) => {
+  const cpf = req.params.cpf
+  if (dbApi) {
+    const titularId = Number(req.params.index)
+    const titulares = dbApi.getTitulares()
+    const titular = titulares.find((t: any) => t.id === titularId)
+    if (!titular) return res.status(404).json({ error: 'titular not found' })
+    const ok = dbApi.removeDependente(titular.cpf, cpf)
+    if (ok) return res.json({ msg: 'dependente removido' })
+    return res.status(404).json({ error: 'dependente não encontrado' })
+  }
   const idx = Number(req.params.index)
   const titular = armazem.Clientes[idx]
   if (!titular) return res.status(404).json({ error: 'titular not found' })
-  const cpf = req.params.cpf
   const ok = titular.removerDependentePorCpf(cpf)
   if (ok) return res.json({ msg: 'dependente removido' })
   return res.status(404).json({ error: 'dependente não encontrado' })
@@ -147,6 +205,16 @@ app.delete('/clientes/:index/dependentes/:cpf', (req: Request, res: Response) =>
 
 // Delete titular (cascade dependents)
 app.delete('/clientes/:index', (req: Request, res: Response) => {
+  // When DB enabled, :index is id
+  if (dbApi) {
+    const id = Number(req.params.index)
+    const titulares = dbApi.getTitulares()
+    const titular = titulares.find((t: any) => t.id === id)
+    if (!titular) return res.status(404).json({ error: 'cliente not found' })
+    const ok = dbApi.removeClienteByCpf(titular.cpf)
+    if (ok) return res.json({ msg: 'cliente e dependentes removidos' })
+    return res.status(500).json({ error: 'falha ao remover' })
+  }
   const idx = Number(req.params.index)
   const cliente = armazem.Clientes[idx]
   if (!cliente) return res.status(404).json({ error: 'cliente not found' })
